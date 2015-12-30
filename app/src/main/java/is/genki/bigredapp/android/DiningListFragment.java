@@ -26,6 +26,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.text.DateFormat;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -53,7 +54,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
     private static final String DINING_LIST_KEY = "DINING_LIST_KEY";
     private static final String DINING_LIST_DATE_KEY = "DINING_LIST_DATE_KEY";
     private static final String LAST_REFRESHED_KEY = "LAST_REFRESHED_KEY";
-    private static final int NUM_DAYS_OF_EVENTS_TO_GET = 6;
+    private static final int NUM_DAYS_OF_EVENTS_TO_GET = 2;
     
     private static Context mContext;
     private JSONArray mDiningList;
@@ -112,8 +113,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
     @Override
     public void onListItemClick(ListView l, View v, int position, long id) {
         super.onListItemClick(l, v, position, id);
-        try {
-            String diningHall = (String) mDiningList.get(position);
+            String diningHall = ((DiningHallListAdapter.DiningListViewHolder) v.getTag()).diningHallName;
             Intent intent = new Intent(mContext, DiningLocationActivity.class);
             intent.putExtra(DiningLocationActivity.KEY_DINING_HALL, diningHall);
 
@@ -121,9 +121,6 @@ public class DiningListFragment extends SwipeRefreshListFragment {
             ActivityOptionsCompat options = ActivityOptionsCompat.makeScaleUpAnimation(
                     v, 0, 0, v.getWidth(), v.getHeight());
             mContext.startActivity(intent, options.toBundle());
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
     }
 
     /**
@@ -145,7 +142,9 @@ public class DiningListFragment extends SwipeRefreshListFragment {
                 // now we can get the calendar events for the list of dining halls
                 getDiningCalendarEvents();
             } catch (JSONException e) {
-                e.printStackTrace();
+                // There was a format issue, so let's just get a new one.
+                mDiningList = new JSONArray();
+                getDiningList();
             }
         }
     }
@@ -157,21 +156,21 @@ public class DiningListFragment extends SwipeRefreshListFragment {
      * When finished, stops the refreshing indicator.
      */
     private void handleCalendarEventsResponse(JSONObject response) {
-        try {
-            ArrayList<NameCalEventList> nameCalEventLists = new ArrayList<>();
+        ArrayList<NameCalEventList> nameCalEventLists = new ArrayList<>();
 
-            Calendar cal = Calendar.getInstance();
-            int offsetUTC = (TimeZone.getDefault().getOffset(cal.getTimeInMillis())) / MS_IN_HOUR;
+        Calendar cal = Calendar.getInstance();
+        int offsetUTC = (TimeZone.getDefault().getOffset(cal.getTimeInMillis())) / MS_IN_HOUR;
 
-            // parse the calendar data into an ArrayList<NameCalEventList>
-            int mDiningListLen = mDiningList.length();
-            for (int i=0; i<mDiningListLen; i++) {
-                String name = (String) mDiningList.get(i);
-
+        // parse the calendar data into an ArrayList<NameCalEventList>
+        int mDiningListLen = mDiningList.length();
+        for (int i = 0; i < mDiningListLen; i++) {
+            String name = null;
+            try {
+                name = (String) mDiningList.get(i);
                 JSONArray jsonEventList = response.getJSONArray(name);
                 int jsonEventListLen = jsonEventList.length();
                 ArrayList<CalEvent> calEventList = new ArrayList<>();
-                for (int j=0; j<jsonEventListLen; j++) {
+                for (int j = 0; j < jsonEventListLen; j++) {
                     JSONObject jsonEvent = jsonEventList.getJSONObject(j);
 
                     CalEvent calEvent = new CalEvent();
@@ -195,19 +194,22 @@ public class DiningListFragment extends SwipeRefreshListFragment {
                 }
                 Collections.sort(calEventList);
                 nameCalEventLists.add(new NameCalEventList(name, calEventList));
+            } catch (Exception e) {
+                // It's okay if a place was not found. Just move on.
+                e.printStackTrace();
             }
+        }
 
-            ArrayAdapter<NameCalEventList> adapter = (ArrayAdapter<NameCalEventList>) getListAdapter();
-            if (adapter == null) {
-                adapter = new DiningHallListAdapter(mContext, R.layout.dining_list_row, nameCalEventLists);
-                setListAdapter(adapter);
-            } else {
-                adapter.clear();
-                adapter.addAll(nameCalEventLists);
-                adapter.notifyDataSetChanged();
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+        ArrayAdapter<NameCalEventList> adapter = (ArrayAdapter<NameCalEventList>) getListAdapter();
+        //Order by what's open
+        Collections.sort(nameCalEventLists);
+        if (adapter == null) {
+            adapter = new DiningHallListAdapter(mContext, R.layout.dining_list_row, nameCalEventLists);
+            setListAdapter(adapter);
+        } else {
+            adapter.clear();
+            adapter.addAll(nameCalEventLists);
+            adapter.notifyDataSetChanged();
         }
         // update the last-refreshed time
         mPreferences.edit().putLong(LAST_REFRESHED_KEY, System.currentTimeMillis()).apply();
@@ -216,7 +218,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
     }
 
     // helper for getDiningCalendarEvents()
-    private static String getRequestCalFormat (Calendar cal) {
+    private static String getRequestCalFormat(Calendar cal) {
         return cal.getDisplayName(Calendar.MONTH, Calendar.SHORT, Locale.US) +
                 cal.get(Calendar.DAY_OF_MONTH) + "," + cal.get(Calendar.YEAR);
     }
@@ -230,9 +232,10 @@ public class DiningListFragment extends SwipeRefreshListFragment {
         try {
             final StringBuilder builder = new StringBuilder();
             int len = mDiningList.length();
-            for (int i=0; i<len; i++) {
-                    builder.append(mDiningList.get(i)).append(',');
+            for (int i = 0; i < len-1; i++) {
+                builder.append(mDiningList.get(i)).append(',');
             }
+            builder.append(mDiningList.get(len-1));
             final String commaSeparatedDiningHalls = builder.toString();
 
             // create the date range of CalEvents to get for each location
@@ -266,15 +269,21 @@ public class DiningListFragment extends SwipeRefreshListFragment {
      */
     private void getDiningList() {
         if (SingletonRequestQueue.isConnected(mContext)) {
-            JsonArrayRequest jsonArrayRequest = (JsonArrayRequest)
-                    new JsonArrayRequest(Request.Method.GET, BASE_URL,
-                    new Response.Listener<JSONArray>() {
+            JsonObjectRequest jsonArrayRequest = (JsonObjectRequest)
+                    new JsonObjectRequest(Request.Method.GET, BASE_URL,
+                    new Response.Listener<JSONObject>() {
                 @Override
-                public void onResponse(JSONArray response) {
+                public void onResponse(JSONObject response) {
                     // cache the result
-                    mPreferences.edit().putString(DINING_LIST_KEY, response.toString()).apply();
                     mPreferences.edit().putLong(DINING_LIST_DATE_KEY, System.currentTimeMillis()).apply();
-                    mDiningList = response;
+                    try {
+                        mDiningList = response.getJSONArray("halls");
+                        JSONArray cafes = response.getJSONArray("cafes");
+                        mDiningList = concatArray(mDiningList,cafes);
+                        mPreferences.edit().putString(DINING_LIST_KEY, mDiningList.toString()).apply();
+                    } catch (org.json.JSONException e){
+                        //Do nothing
+                    }
                     getDiningCalendarEvents();
                 }
             }, SingletonRequestQueue.getErrorListener(mContext))
@@ -315,7 +324,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
      * If we are before it, we stop, saying we are closed until the event starts.
      * If we are in it, we stop, saying we are open until the event ends.
      * If nothing is found (this is looping through the next NUM_DAYS_OF_EVENTS_TO_GET days),
-     *  then just return "closed".
+     * then just return "closed".
      */
     private static void setHoursText(TextView hoursTextView, Calendar rightNow,
                                      ArrayList<CalEvent> calEventList) {
@@ -376,7 +385,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
         }
     }
 
-    public static class NameCalEventList {
+    public static class NameCalEventList implements Comparable<NameCalEventList> {
         public final String name;
         public final ArrayList<CalEvent> calEventList;
 
@@ -384,6 +393,14 @@ public class DiningListFragment extends SwipeRefreshListFragment {
             this.name = name;
             this.calEventList = calEventList;
         }
+
+        public int compareTo(@NonNull NameCalEventList cOther) {
+            Calendar rightNow = Calendar.getInstance();
+            int thisStatus = calToRatingInt(rightNow, calEventList);
+            int otherStatus = calToRatingInt(rightNow, cOther.calEventList);
+            return otherStatus - thisStatus;
+        }
+
     }
 
     /**
@@ -394,8 +411,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
 
         final int mResource;
         final LayoutInflater mInflater;
-        final Pattern p = Pattern.compile("\\b([a-z])");
-        final Calendar mRightNowCal;
+        Calendar mRightNowCal;
 
         public DiningHallListAdapter(Context context, int res, ArrayList<NameCalEventList> items) {
             super(context, res, items);
@@ -407,6 +423,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
             NameCalEventList nameCalEventList = getItem(position);
+            mRightNowCal = Calendar.getInstance();
 
             // http://developer.android.com/training/improving-layouts/smooth-scrolling.html#ViewHolder
             // http://lucasr.org/2012/04/05/performance-tips-for-androids-listview/
@@ -416,9 +433,11 @@ public class DiningListFragment extends SwipeRefreshListFragment {
                 holder = new DiningListViewHolder();
                 holder.nameTextView = (TextView) convertView.findViewById(R.id.dining_list_row_name);
                 holder.hoursTextView = (TextView) convertView.findViewById(R.id.dining_list_row_hours);
+                holder.diningHallName = nameCalEventList.name;
                 convertView.setTag(holder);
             } else {
                 holder = (DiningListViewHolder) convertView.getTag();
+                holder.diningHallName = nameCalEventList.name;
             }
 
             if (mTextColor == 0) {
@@ -428,15 +447,7 @@ public class DiningListFragment extends SwipeRefreshListFragment {
             setHoursText(holder.hoursTextView, mRightNowCal, nameCalEventList.calEventList);
 
             // parse the name to make it pretty
-            String name = nameCalEventList.name;
-            name = name.replace("_", " ");
-            Matcher m = p.matcher(name);
-            StringBuffer sb = new StringBuffer();
-            while (m.find()) {
-                m.appendReplacement(sb, m.group(1).toUpperCase());
-            }
-            m.appendTail(sb);
-            holder.nameTextView.setText(sb.toString());
+            holder.nameTextView.setText(formatDiningHallName(nameCalEventList.name));
 
             return convertView;
         }
@@ -445,6 +456,77 @@ public class DiningListFragment extends SwipeRefreshListFragment {
         class DiningListViewHolder {
             TextView nameTextView;
             TextView hoursTextView;
+            String diningHallName;
         }
+    }
+
+    /**
+     * Converts the API's badly formatted string to something nicer (atrium_cafe becomes Atrium Cafe)
+     *
+     * @param name the name to be formatted
+     * @return the formatted name
+     */
+    protected static String formatDiningHallName(String name) {
+        final Pattern p = Pattern.compile("\\b([a-z])");
+        name = name.replace("_", " ");
+        Matcher m = p.matcher(name);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            m.appendReplacement(sb, m.group(1).toUpperCase());
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    /**
+     * Assigns a rating to a calendar's times to right now where 2 is currently open, 1 is almost open, 0 is closed.
+     *
+     * @param rightNow     the current calendar instance
+     * @param calEventList the calendar event list to be processed
+     * @return the rating
+     */
+    private static int calToRatingInt(Calendar rightNow, ArrayList<CalEvent> calEventList) {
+        int status = 0;
+        for (CalEvent e : calEventList) {
+            Calendar startCal = e.startCal;
+            Calendar endCal = e.endCal;
+            if (rightNow.after(startCal) && rightNow.before(endCal)) {
+                status = 2;
+                break; // stop loop here
+            } else if (rightNow.before(startCal)) {
+                String dayText = "";
+                int eventDayOfWeek = startCal.get(Calendar.DAY_OF_WEEK);
+                int rightNowDayOfWeek = rightNow.get(Calendar.DAY_OF_WEEK);
+
+                int dayDiff = eventDayOfWeek - rightNowDayOfWeek; // difference in day between event and today
+                if (dayDiff == 0) {
+                    if (startCal.get(Calendar.HOUR_OF_DAY) - rightNow.get(Calendar.HOUR_OF_DAY) <= 2) {
+                        status = 1;
+                    }
+                    break; // stop loop here
+                }
+                break; // stop loop here
+            }
+        }
+        return status;
+    }
+
+    /**
+     * Concatenates two JSONArrays (for combining cafe/hall arrays)
+     * @param arr1 The first array to be concatenated
+     * @param arr2 The second array to be concatenated
+     * @return The concatenated JSONArray
+     * @throws JSONException
+     */
+    private JSONArray concatArray(JSONArray arr1, JSONArray arr2)
+            throws JSONException {
+        JSONArray result = new JSONArray();
+        for (int i = 0; i < arr1.length(); i++) {
+            result.put(arr1.get(i));
+        }
+        for (int i = 0; i < arr2.length(); i++) {
+            result.put(arr2.get(i));
+        }
+        return result;
     }
 }
